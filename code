@@ -1,0 +1,134 @@
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import (
+    classification_report, confusion_matrix, accuracy_score,
+    precision_score, recall_score, f1_score, roc_auc_score, roc_curve
+)
+
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+RANDOM_STATE = 42
+
+DATA_PATH = "/content/loan_approval_dataset.csv"  
+df = pd.read_csv(DATA_PATH)
+
+df.columns = df.columns.str.strip()
+
+target = "loan_status"
+
+df[target] = df[target].astype(str).str.strip().str.title()
+
+df = df[df[target].isin(["Approved", "Rejected"])].reset_index(drop=True)
+
+y = df[target].map({"Approved": 1, "Rejected": 0})
+X = df.drop(columns=[target])
+
+num_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
+cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+
+if "loan_id" in num_cols:
+    num_cols.remove("loan_id")
+
+print("\nNumerical columns:", num_cols)
+print("Categorical columns:", cat_cols)
+
+numeric_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', StandardScaler())
+])
+
+categorical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+])
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numeric_transformer, num_cols),
+        ('cat', categorical_transformer, cat_cols)
+    ]
+)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
+)
+
+print("\nTrain class distribution:\n", pd.Series(y_train).value_counts())
+print("Test class distribution:\n", pd.Series(y_test).value_counts())
+
+smote = SMOTE(random_state=RANDOM_STATE)
+
+pipe_lr = ImbPipeline(steps=[
+    ('pre', preprocessor),
+    ('smote', smote),
+    ('clf', LogisticRegression(solver='liblinear', random_state=RANDOM_STATE, max_iter=1000))
+])
+
+pipe_dt = ImbPipeline(steps=[
+    ('pre', preprocessor),
+    ('smote', smote),
+    ('clf', DecisionTreeClassifier(random_state=RANDOM_STATE))
+])
+
+print("\nTraining Logistic Regression...")
+pipe_lr.fit(X_train, y_train)
+
+print("Training Decision Tree...")
+pipe_dt.fit(X_train, y_train)
+
+def evaluate_model(pipeline, X_test, y_test, name="Model"):
+    y_pred = pipeline.predict(X_test)
+    try:
+        y_proba = pipeline.predict_proba(X_test)[:, 1]
+    except:
+        y_proba = None
+
+    print(f"\n=== {name} ===")
+    print("Accuracy:", accuracy_score(y_test, y_pred))
+    print("Precision:", precision_score(y_test, y_pred, zero_division=0))
+    print("Recall:", recall_score(y_test, y_pred, zero_division=0))
+    print("F1:", f1_score(y_test, y_pred, zero_division=0))
+    print("\nClassification Report:\n", classification_report(y_test, y_pred, zero_division=0))
+    print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+
+    if y_proba is not None:
+        roc_auc = roc_auc_score(y_test, y_proba)
+        print("ROC AUC:", roc_auc)
+        fpr, tpr, _ = roc_curve(y_test, y_proba)
+        plt.figure(figsize=(6, 4))
+        plt.plot(fpr, tpr, label=f"{name} (AUC={roc_auc:.3f})")
+        plt.plot([0, 1], [0, 1], "--")
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title(f"ROC Curve: {name}")
+        plt.legend()
+        plt.show()
+
+evaluate_model(pipe_lr, X_test, y_test, "Logistic Regression")
+evaluate_model(pipe_dt, X_test, y_test, "Decision Tree")
+
+param_grid = {
+    'clf__max_depth': [3, 5, 7, None],
+    'clf__min_samples_leaf': [1, 2, 5, 10]
+}
+grid = GridSearchCV(pipe_dt, param_grid, cv=5, scoring='f1', n_jobs=-1, verbose=1)
+grid.fit(X_train, y_train)
+
+print("\nBest params:", grid.best_params_)
+print("Best CV F1:", grid.best_score_)
+
+best_dt = grid.best_estimator_
+evaluate_model(best_dt, X_test, y_test, "Decision Tree (Tuned)")
